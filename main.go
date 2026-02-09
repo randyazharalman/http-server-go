@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/randyazharalman/http-server-go/internal/auth"
 	"github.com/randyazharalman/http-server-go/internal/database"
 
 	_ "github.com/lib/pq"
@@ -67,6 +68,7 @@ func main() {
 
 	mux.HandleFunc("/api/healthz", healthzHandler)
 	mux.HandleFunc("/api/users", apiCfg.usersHandler)
+	mux.HandleFunc("/api/login", apiCfg.loginHandler)
 	mux.HandleFunc("/api/chirps", apiCfg.chirpsHandler)
 	mux.HandleFunc("/api/chirps/{chirpID}", apiCfg.getChirpByIDHandler)
 	mux.HandleFunc("/api/validate_chirp", validateChirpHandler)
@@ -166,7 +168,8 @@ func (cfg *apiConfig) createUsersHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	type requestBody struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -177,11 +180,19 @@ func (cfg *apiConfig) createUsersHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Error hashing password: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+		return
+	}
+
 	userParams := database.CreateUserParams{
-		ID:        uuid.New(),
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		Email:     params.Email,
+		ID:             uuid.New(),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
 	}
 	user, err := cfg.dbQueries.CreateUser(context.Background(), userParams)
 	if err != nil {
@@ -189,8 +200,21 @@ func (cfg *apiConfig) createUsersHandler(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Failed to create user")
 		return
 	}
+	// Return user without password
+	type responseUser struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
 
-	respondWithJSON(w, http.StatusCreated, user)
+	respondWithJSON(w, http.StatusCreated, responseUser{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
+
 }
 
 func (cfg *apiConfig) getUsersHandler(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +331,63 @@ func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request
 
 	respondWithJSON(w, http.StatusOK, chirp)
 
+}
+
+func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	type requestBody struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := requestBody{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	user, err := cfg.dbQueries.GetUserByEmail(context.Background(), params.Email)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+			return
+		}
+		log.Printf("Error getting user: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Failed to login")
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil {
+		log.Printf("Error checking password: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Failed to verify password")
+		return
+	}
+
+	if !match {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	// Return user without password
+	type responseUser struct {
+		ID        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Email     string    `json:"email"`
+	}
+
+	respondWithJSON(w, http.StatusOK, responseUser{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
 }
 
 func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
